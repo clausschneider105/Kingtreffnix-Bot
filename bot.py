@@ -85,6 +85,11 @@ MOD_LOG_COLORS = {
 # =========================================================
 
 intents = discord.Intents.default()
+intents.message_content = True
+
+# Discord-Nachrichten für detaillierte Lösch-Logs kurz zwischenspeichern.
+message_cache = {}
+MESSAGE_CACHE_LIMIT = 5000
 
 bot = commands.Bot(
     command_prefix="!",
@@ -117,7 +122,8 @@ async def send_mod_log(
     color: discord.Color,
     target: str,
     actor: str,
-    reason: str
+    reason: str,
+    extra_fields=None
 ):
     channel = get_mod_log_channel(guild)
 
@@ -140,6 +146,15 @@ async def send_mod_log(
         value=reason or "Kein Grund angegeben",
         inline=False
     )
+
+    if extra_fields:
+        for field_name, field_value, inline in extra_fields:
+            embed.add_field(
+                name=field_name,
+                value=str(field_value)[:1024] or "-",
+                inline=inline
+            )
+
     embed.set_footer(text=BOT_DISPLAY_NAME)
 
     try:
@@ -180,6 +195,88 @@ def format_actor(actor) -> str:
     if actor is None:
         return "Unbekannt"
     return f"{actor.mention} ({actor})"
+
+
+def shorten_text(text, limit=1000):
+    text = text if text is not None else "[Kein Text / nur Anhang oder Einbettung]"
+    text = str(text)
+    if not text:
+        text = "[Kein Text / nur Anhang oder Einbettung]"
+    if len(text) > limit:
+        return text[:limit - 3] + "..."
+    return text
+
+
+def format_role_list(roles):
+    if not roles:
+        return "Keine"
+    return ", ".join(role.mention for role in roles)
+
+
+def format_permission_value(value):
+    if value is None:
+        return "Unverändert"
+    if value is True:
+        return "Erlaubt"
+    if value is False:
+        return "Verweigert"
+    return str(value)
+
+
+def describe_audit_changes(entry):
+    changes = []
+    for change in getattr(entry, "changes", []):
+        key = getattr(change, "key", "unbekannt")
+        before = getattr(change, "before", None)
+        after = getattr(change, "after", None)
+        changes.append(
+            f"**{key}:** `{shorten_text(before, 300)}` → `{shorten_text(after, 300)}`"
+        )
+    return "\n".join(changes) if changes else "Keine Detailänderungen von Discord geliefert."
+
+
+def describe_role_permission_changes(before: discord.Role, after: discord.Role):
+    changes = []
+    for permission_name in discord.Permissions.VALID_FLAGS:
+        old_value = getattr(before.permissions, permission_name)
+        new_value = getattr(after.permissions, permission_name)
+        if old_value != new_value:
+            changes.append(
+                f"**{permission_name}:** "
+                f"{'Erlaubt' if old_value else 'Verweigert'} → "
+                f"{'Erlaubt' if new_value else 'Verweigert'}"
+            )
+    return "\n".join(changes) if changes else "Keine einzelnen Rollenrechte geändert."
+
+
+def describe_channel_permission_changes(before, after):
+    changes = []
+    before_overwrites = getattr(before, "overwrites", {}) or {}
+    after_overwrites = getattr(after, "overwrites", {}) or {}
+    targets = set(before_overwrites.keys()) | set(after_overwrites.keys())
+
+    for target in targets:
+        old = before_overwrites.get(target)
+        new = after_overwrites.get(target)
+        target_name = getattr(target, "mention", None) or str(target)
+
+        for permission_name in discord.Permissions.VALID_FLAGS:
+            old_value = getattr(old, permission_name, None) if old else None
+            new_value = getattr(new, permission_name, None) if new else None
+            if old_value != new_value:
+                def state(value):
+                    if value is True:
+                        return "Erlaubt"
+                    if value is False:
+                        return "Verweigert"
+                    return "Neutral"
+
+                changes.append(
+                    f"**{target_name} – {permission_name}:** "
+                    f"{state(old_value)} → {state(new_value)}"
+                )
+
+    return "\n".join(changes) if changes else "Keine einzelnen Kanalrechte erkannt."
 
 
 # =========================================================
@@ -1608,10 +1705,8 @@ async def on_guild_channel_update(
             color=MOD_LOG_COLORS["channel_renamed"],
             target=f"#{after.name}",
             actor=format_actor(actor),
-            reason=(
-                audit_reason
-                or f"Name geändert: {before.name} → {after.name}"
-            )
+            reason=audit_reason or f"Name geändert: {before.name} → {after.name}",
+            extra_fields=[("Vorheriger Name", f"#{before.name}", False), ("Neuer Name", f"#{after.name}", False)]
         )
 
     if getattr(before, "overwrites", None) != getattr(after, "overwrites", None):
@@ -1621,15 +1716,17 @@ async def on_guild_channel_update(
             after.id
         )
 
+        detail = describe_channel_permission_changes(before, after)
+
         await send_mod_log(
             guild=after.guild,
             action="Channel-Berechtigung geändert",
             color=MOD_LOG_COLORS["channel_permissions"],
             target=f"#{after.name}",
             actor=format_actor(actor),
-            reason=audit_reason or "Berechtigungen des Channels geändert"
+            reason=audit_reason or "Berechtigungen des Channels geändert",
+            extra_fields=[("Berechtigungsänderungen", detail, False)]
         )
-
 
 @bot.event
 async def on_guild_role_create(role: discord.Role):
@@ -1681,15 +1778,96 @@ async def on_guild_role_update(
         after.id
     )
 
+    detail = describe_role_permission_changes(before, after)
+    audit_detail = "Keine zusätzlichen Audit-Log-Details."
+    try:
+        async for entry in after.guild.audit_logs(limit=10, action=discord.AuditLogAction.role_update):
+            if getattr(entry.target, "id", None) == after.id and (discord.utils.utcnow() - entry.created_at).total_seconds() <= 15:
+                audit_detail = describe_audit_changes(entry)
+                break
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
     await send_mod_log(
         guild=after.guild,
         action="Rolle geändert",
         color=MOD_LOG_COLORS["role_updated"],
         target=f"@{after.name}",
         actor=format_actor(actor),
-        reason=audit_reason or "Einstellungen der Rolle geändert"
+        reason=audit_reason or "Einstellungen der Rolle geändert",
+        extra_fields=[
+            ("Rollenname vorher", before.name, True),
+            ("Rollenname nachher", after.name, True),
+            ("Rechte der Rolle", detail, False),
+            ("Weitere Änderungen", audit_detail, False),
+        ]
     )
 
+
+@bot.event
+async def on_member_update(
+    before: discord.Member,
+    after: discord.Member
+):
+    # Rollen hinzugefügt / entfernt
+    before_roles = {role.id: role for role in before.roles if role.is_default() is False}
+    after_roles = {role.id: role for role in after.roles if role.is_default() is False}
+
+    added_roles = [after_roles[rid] for rid in after_roles.keys() - before_roles.keys()]
+    removed_roles = [before_roles[rid] for rid in before_roles.keys() - after_roles.keys()]
+
+    if added_roles or removed_roles:
+        actor, audit_reason = await get_audit_actor(
+            after.guild,
+            discord.AuditLogAction.member_role_update,
+            after.id
+        )
+
+        await send_mod_log(
+            guild=after.guild,
+            action="Rollen vergeben / entfernt",
+            color=MOD_LOG_COLORS["role_updated"],
+            target=f"{after.mention} ({after})",
+            actor=format_actor(actor),
+            reason=audit_reason or "Rollen eines Users geändert",
+            extra_fields=[
+                ("Rollen vergeben", format_role_list(added_roles), False),
+                ("Rollen entfernt", format_role_list(removed_roles), False),
+            ]
+        )
+
+    # Timeout
+    before_timeout = before.communication_disabled_until
+    after_timeout = after.communication_disabled_until
+
+    if before_timeout == after_timeout:
+        return
+
+    actor, audit_reason = await get_audit_actor(
+        after.guild,
+        discord.AuditLogAction.member_update,
+        after.id
+    )
+
+    if after_timeout is not None:
+        await send_mod_log(
+            guild=after.guild,
+            action="Timeout vergeben",
+            color=MOD_LOG_COLORS["timeout_given"],
+            target=f"{after.mention} ({after})",
+            actor=format_actor(actor),
+            reason=audit_reason or "Timeout vergeben",
+            extra_fields=[("Timeout bis", f"{after_timeout:%d.%m.%Y %H:%M:%S UTC}", False)]
+        )
+    else:
+        await send_mod_log(
+            guild=after.guild,
+            action="Timeout entfernt",
+            color=MOD_LOG_COLORS["timeout_removed"],
+            target=f"{after.mention} ({after})",
+            actor=format_actor(actor),
+            reason=audit_reason or "Timeout entfernt"
+        )
 
 @bot.event
 async def on_member_ban(guild: discord.Guild, user: discord.User):
@@ -1705,7 +1883,8 @@ async def on_member_ban(guild: discord.Guild, user: discord.User):
         color=MOD_LOG_COLORS["user_banned"],
         target=f"{user.mention} ({user})",
         actor=format_actor(actor),
-        reason=audit_reason or f"User gebannt von {actor or 'Unbekannt'}"
+        reason=audit_reason or "Kein Ban-Grund angegeben",
+        extra_fields=[("Gebannt wurde", f"{user.mention} ({user})", False)]
     )
 
 
@@ -1723,7 +1902,8 @@ async def on_member_unban(guild: discord.Guild, user: discord.User):
         color=MOD_LOG_COLORS["user_unbanned"],
         target=f"{user.mention} ({user})",
         actor=format_actor(actor),
-        reason=audit_reason or f"User entbannt von {actor or 'Unbekannt'}"
+        reason=audit_reason or "Kein Entbannungs-Grund angegeben",
+        extra_fields=[("Entbannt wurde", f"{user.mention} ({user})", False)]
     )
 
 
@@ -1744,7 +1924,8 @@ async def on_member_remove(member: discord.Member):
         color=MOD_LOG_COLORS["user_kicked"],
         target=f"{member.mention} ({member})",
         actor=format_actor(actor),
-        reason=audit_reason or f"User gekickt von {actor}"
+        reason=audit_reason or "Kein Kick-Grund angegeben",
+        extra_fields=[("Gekickt wurde", f"{member.mention} ({member})", False)]
     )
 
 
@@ -1789,17 +1970,51 @@ async def on_member_update(
 
 
 @bot.event
+async def on_message(message: discord.Message):
+    # Message Content Intent ist erforderlich, damit Inhalte gespeichert
+    # und !-Commands verarbeitet werden können.
+    if message.guild is not None and not message.author.bot:
+        message_cache[message.id] = {
+            "guild_id": message.guild.id,
+            "channel_id": message.channel.id,
+            "author": message.author,
+            "content": message.content,
+        }
+
+        if len(message_cache) > MESSAGE_CACHE_LIMIT:
+            oldest_ids = list(message_cache.keys())[:500]
+            for message_id in oldest_ids:
+                message_cache.pop(message_id, None)
+
+    await bot.process_commands(message)
+
+
+@bot.event
 async def on_message_delete(message: discord.Message):
     if message.guild is None:
         return
 
     if message.author and message.author.bot:
+        message_cache.pop(message.id, None)
         return
+
+    cached = message_cache.pop(message.id, {})
+    author = cached.get("author") or message.author
+    content = cached.get("content", message.content)
 
     actor, audit_reason = await get_audit_actor(
         message.guild,
-        discord.AuditLogAction.message_delete
+        discord.AuditLogAction.message_delete,
+        getattr(message.channel, "id", None)
     )
+
+    # Falls Discord den Kanal nicht als Target liefert, noch einmal ohne Target suchen.
+    if actor is None:
+        actor, audit_reason = await get_audit_actor(
+            message.guild,
+            discord.AuditLogAction.message_delete,
+            delay=0
+        )
 
     await send_mod_log(
         guild=message.guild,
@@ -1810,7 +2025,12 @@ async def on_message_delete(message: discord.Message):
             f"Nachricht-ID: `{message.id}`"
         ),
         actor=format_actor(actor),
-        reason=audit_reason or "Nachricht wurde gelöscht"
+        reason=audit_reason or "Nachricht wurde gelöscht",
+        extra_fields=[
+            ("Nachrichten-Autor", format_actor(author), False),
+            ("Gelöscht von", format_actor(actor), False),
+            ("Nachricht", f"```\n{shorten_text(content)}\n```", False),
+        ]
     )
 
 
@@ -1837,9 +2057,13 @@ async def on_message_edit(
             f"Nachricht-ID: `{before.id}`"
         ),
         actor=format_actor(before.author),
-        reason="Nachricht wurde bearbeitet"
+        reason="Nachricht wurde bearbeitet",
+        extra_fields=[
+            ("Autor", format_actor(before.author), False),
+            ("Vorher", f"```\n{shorten_text(before.content)}\n```", False),
+            ("Nachher", f"```\n{shorten_text(after.content)}\n```", False),
+        ]
     )
-
 
 # =========================================================
 # BOT READY
