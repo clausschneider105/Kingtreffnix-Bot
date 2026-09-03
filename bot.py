@@ -1014,6 +1014,10 @@ async def get_latest_youtube_videos(session):
                 "title",
                 "Neues Video"
             ),
+            "description": snippet.get(
+    "description",
+    ""
+),
             "published_at": snippet.get(
                 "publishedAt"
             ),
