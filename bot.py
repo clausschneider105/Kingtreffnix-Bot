@@ -55,41 +55,12 @@ YOUTUBE_DISCORD_CHANNEL_NAME = "└🔔content"
 
 YOUTUBE_CHECK_INTERVAL = 120
 
-# Mod-Logs
-MOD_LOG_CHANNEL_NAME = "├🤓mod-log"
-
-MOD_LOG_COLORS = {
-    "channel_created": discord.Color.green(),
-    "channel_deleted": discord.Color.orange(),
-    "channel_renamed": discord.Color.blue(),
-    "channel_permissions": discord.Color.orange(),
-    "role_created": discord.Color.green(),
-    "role_deleted": discord.Color.red(),
-    "role_updated": discord.Color.orange(),
-    "user_banned": discord.Color.red(),
-    "user_unbanned": discord.Color.blue(),
-    "user_kicked": discord.Color.red(),
-    "timeout_given": discord.Color.orange(),
-    "timeout_removed": discord.Color.blue(),
-    "message_deleted": discord.Color.green(),
-    "message_edited": discord.Color.green(),
-    "ticket_created": discord.Color.green(),
-    "ticket_claimed": discord.Color.green(),
-    "ticket_closed": discord.Color.green(),
-    "ticket_reopened": discord.Color.green(),
-    "ticket_deleted": discord.Color.blue(),
-}
 
 # =========================================================
 # BOT
 # =========================================================
 
 intents = discord.Intents.default()
-intents.message_content = True
-
-# Discord-Nachrichten für detaillierte Lösch-Logs kurz zwischenspeichern.
-message_cache = {}
-MESSAGE_CACHE_LIMIT = 5000
 
 bot = commands.Bot(
     command_prefix="!",
@@ -103,6 +74,58 @@ bot = commands.Bot(
 
 last_youtube_video_id = None
 last_live_video_id = None
+
+
+# =========================================================
+# TICKET HILFSFUNKTIONEN
+# =========================================================
+
+def can_manage_ticket(member: discord.Member) -> bool:
+
+    if member.guild_permissions.administrator:
+        return True
+
+    return any(
+        role.name in [MOD_ROLE_NAME, ADMIN_ROLE_NAME]
+        for role in member.roles
+    )
+
+
+def get_ticket_category(guild: discord.Guild):
+
+    return discord.utils.get(
+        guild.categories,
+        name=TICKET_CATEGORY_NAME
+    )
+
+
+def is_ticket_channel(channel) -> bool:
+
+    category = getattr(channel, "category", None)
+
+    return (
+        category is not None
+        and category.name == TICKET_CATEGORY_NAME
+        and channel.name.startswith("ticket-")
+    )
+
+
+def get_ticket_user_id(channel):
+
+    topic = channel.topic or ""
+
+    if "User-ID:" not in topic:
+        return None
+
+    try:
+
+        return int(
+            topic.split("User-ID:")[1].split("|")[0].strip()
+        )
+
+    except ValueError:
+
+        return None
 
 
 # =========================================================
@@ -280,15 +303,6 @@ class TicketButtons(discord.ui.View):
             view=view
         )
 
-        await send_mod_log(
-            guild=interaction.guild,
-            action="Ticket geclaimt",
-            color=MOD_LOG_COLORS["ticket_claimed"],
-            target=interaction.channel.mention,
-            actor=format_actor(interaction.user),
-            reason=f"Ticket geclaimt von {interaction.user}"
-        )
-
         await interaction.followup.send(
             "🙋 Du hast das Ticket übernommen.",
             ephemeral=True
@@ -367,15 +381,6 @@ class TicketButtons(discord.ui.View):
 
         await interaction.message.edit(
             view=view
-        )
-
-        await send_mod_log(
-            guild=interaction.guild,
-            action="Ticket geschlossen",
-            color=MOD_LOG_COLORS["ticket_closed"],
-            target=channel.mention,
-            actor=format_actor(interaction.user),
-            reason=f"Ticket geschlossen von {interaction.user}"
         )
 
         # NUR der klickende Mod/Admin sieht diese Nachricht
@@ -462,15 +467,6 @@ class TicketButtons(discord.ui.View):
             view=view
         )
 
-        await send_mod_log(
-            guild=interaction.guild,
-            action="Ticket wieder geöffnet",
-            color=MOD_LOG_COLORS["ticket_reopened"],
-            target=channel.mention,
-            actor=format_actor(interaction.user),
-            reason=f"Ticket wieder geöffnet von {interaction.user}"
-        )
-
         # NUR der klickende Mod/Admin sieht diese Nachricht
         await interaction.followup.send(
             "🔓 Das Ticket wurde wieder geöffnet.",
@@ -533,18 +529,7 @@ class TicketButtons(discord.ui.View):
             ephemeral=True
         )
 
-        channel = interaction.channel
-
-        await send_mod_log(
-            guild=channel.guild,
-            action="Ticket gelöscht",
-            color=MOD_LOG_COLORS["ticket_deleted"],
-            target=f"#{channel.name}",
-            actor=format_actor(interaction.user),
-            reason=f"Ticket gelöscht von {interaction.user}"
-        )
-
-        await channel.delete(
+        await interaction.channel.delete(
             reason=f"Ticket gelöscht von {interaction.user}"
         )
 
@@ -755,17 +740,6 @@ class TicketSelect(discord.ui.Select):
             view=TicketButtons()
         )
 
-        await send_mod_log(
-            guild=guild,
-            action="Ticket erstellt",
-            color=MOD_LOG_COLORS["ticket_created"],
-            target=ticket_channel.mention,
-            actor=format_actor(interaction.user),
-            reason=(
-                f"{selected_category}-Ticket erstellt von "
-                f"{interaction.user}"
-            )
-        )
 
         # -------------------------------------------------
         # Erfolgreiche Antwort
@@ -1015,9 +989,9 @@ async def get_latest_youtube_videos(session):
                 "Neues Video"
             ),
             "description": snippet.get(
-    "description",
-    ""
-),
+                "description",
+                ""
+            ),
             "published_at": snippet.get(
                 "publishedAt"
             ),
@@ -1080,27 +1054,42 @@ def create_youtube_embed(
     title,
     video_id,
     thumbnail,
-    is_live=False
+    description_text="",
+    is_live=False,
+    is_scheduled=False
 ):
+    # ---------------------------------------------------------
+    # Beschreibung: Nur der erste Absatz wird angezeigt.
+    # Sobald eine freie Zeile kommt, wird der Rest abgeschnitten.
+    # ---------------------------------------------------------
+    short_description = (description_text or "").strip()
 
-    if is_live:
+    if "\n\n" in short_description:
+        short_description = short_description.split("\n\n", 1)[0].strip()
 
-        embed = discord.Embed(
-            title=title,
-            url=f"https://www.youtube.com/watch?v={video_id}",
-            description="🔴 **LIVE auf YouTube**"
-        )
+    if len(short_description) > 1000:
+        short_description = short_description[:1000].rstrip() + "..."
 
+    if is_scheduled:
+        status_text = "📅 **Stream geplant**"
+    elif is_live:
+        status_text = "🔴 **LIVE auf YouTube**"
     else:
+        status_text = "🎬 **Neues Video auf YouTube**"
 
-        embed = discord.Embed(
-            title=title,
-            url=f"https://www.youtube.com/watch?v={video_id}",
-            description="🎬 Neues Video auf YouTube"
-        )
+    if short_description:
+        embed_description = f"{status_text}\n\n{short_description}"
+    else:
+        embed_description = status_text
+
+    embed = discord.Embed(
+        title=title,
+        url=f"https://www.youtube.com/watch?v={video_id}",
+        description=embed_description,
+        color=discord.Color.red()
+    )
 
     if thumbnail:
-
         embed.set_image(
             url=thumbnail
         )
@@ -1118,45 +1107,34 @@ def create_youtube_embed(
 
 @tasks.loop(seconds=YOUTUBE_CHECK_INTERVAL)
 async def youtube_checker():
-
     global last_youtube_video_id
     global last_live_video_id
 
     try:
-
         discord_channel = get_youtube_discord_channel()
 
         if discord_channel is None:
-
             print(
                 f"YouTube-Kanal "
                 f"{YOUTUBE_DISCORD_CHANNEL_NAME} "
                 f"wurde nicht gefunden."
             )
-
             return
 
-
         async with aiohttp.ClientSession() as session:
-
-            videos = await get_latest_youtube_videos(
-                session
-            )
+            videos = await get_latest_youtube_videos(session)
 
             if not videos:
                 return
 
-
             # -------------------------------------------------
             # ERSTER START
             # -------------------------------------------------
-            #
-            # Beim ersten Check werden bereits vorhandene
-            # Videos NICHT nachträglich gespammt.
-            #
-
+            # Bereits vorhandene Videos/Streams werden beim
+            # ersten Start nicht nachträglich angekündigt.
+            # Ein bereits laufender Stream wird nur gemerkt.
+            # -------------------------------------------------
             if last_youtube_video_id is None:
-
                 last_youtube_video_id = videos[0]["id"]
 
                 video_details = await get_video_details(
@@ -1164,122 +1142,101 @@ async def youtube_checker():
                     [video["id"] for video in videos]
                 )
 
-                # Bereits laufenden Stream beim Start
-                # ebenfalls merken, damit er nicht mehrfach
-                # gepostet wird.
-
                 for video in video_details:
-
-                    live_details = video.get(
-                        "liveStreamingDetails"
-                    )
+                    live_details = video.get("liveStreamingDetails")
 
                     if not live_details:
                         continue
 
-                    actual_start = live_details.get(
-                        "actualStartTime"
-                    )
-
-                    actual_end = live_details.get(
-                        "actualEndTime"
-                    )
+                    actual_start = live_details.get("actualStartTime")
+                    actual_end = live_details.get("actualEndTime")
 
                     if actual_start and not actual_end:
-
                         last_live_video_id = video["id"]
 
-                print(
-                    "YouTube-Checker gestartet."
-                )
-
+                print("YouTube-Checker gestartet.")
                 return
 
-
             # -------------------------------------------------
-            # NEUE VIDEOS
+            # NEUE YOUTUBE-UPLOADS
             # -------------------------------------------------
-
             newest_video = videos[0]
 
             if newest_video["id"] != last_youtube_video_id:
-
-                # Neue Videos seit dem letzten Check
                 new_videos = []
 
                 for video in videos:
-
                     if video["id"] == last_youtube_video_id:
                         break
-
                     new_videos.append(video)
 
-
-                # Älteste zuerst
+                # Älteste zuerst ankündigen
                 new_videos.reverse()
-
 
                 video_details = await get_video_details(
                     session,
                     [video["id"] for video in new_videos]
                 )
 
-
                 details_by_id = {
                     video["id"]: video
                     for video in video_details
                 }
 
-
                 for video in new_videos:
-
-                    details = details_by_id.get(
-                        video["id"]
-                    )
+                    details = details_by_id.get(video["id"])
 
                     if not details:
                         continue
 
-
-                    live_details = details.get(
-                        "liveStreamingDetails"
-                    )
-
+                    live_details = details.get("liveStreamingDetails")
 
                     # -------------------------------------------------
-                    # LIVE-STREAM
+                    # LIVESTREAM / GEPLANTER STREAM
                     # -------------------------------------------------
-
                     if live_details:
+                        actual_start = live_details.get("actualStartTime")
+                        actual_end = live_details.get("actualEndTime")
 
-                        actual_start = live_details.get(
-                            "actualStartTime"
-                        )
+                        # Geplanter Stream: noch nicht gestartet.
+                        # NIEMALS als normales Video behandeln.
+                        if not actual_start:
+                            embed = create_youtube_embed(
+                                title=video["title"],
+                                video_id=video["id"],
+                                thumbnail=video["thumbnail"],
+                                description_text=video.get("description", ""),
+                                is_scheduled=True
+                            )
 
-                        actual_end = live_details.get(
-                            "actualEndTime"
-                        )
+                            await discord_channel.send(
+                                content=(
+                                    f"@everyone "
+                                    f"{YOUTUBE_CHANNEL_NAME} "
+                                    f"hat einen **Stream geplant**. 📅"
+                                ),
+                                embed=embed
+                            )
 
-                        # Nur wenn tatsächlich LIVE
+                            continue
+
+                        # Tatsächlich LIVE
                         if actual_start and not actual_end:
-
                             if video["id"] != last_live_video_id:
-
                                 embed = create_youtube_embed(
                                     title=video["title"],
                                     video_id=video["id"],
                                     thumbnail=video["thumbnail"],
+                                    description_text=video.get("description", ""),
                                     is_live=True
                                 )
 
                                 await discord_channel.send(
-
                                     content=(
                                         f"@everyone "
                                         f"{YOUTUBE_CHANNEL_NAME} "
                                         f"ist gerade **LIVE**! 🔴"
                                     ),
-
                                     embed=embed
                                 )
 
@@ -1287,75 +1244,55 @@ async def youtube_checker():
 
                             continue
 
+                        # Beendete Streams nicht als normales Video posten.
+                        continue
 
                     # -------------------------------------------------
-                    # NORMALER UPLOAD
+                    # NORMALES VIDEO / SHORT
                     # -------------------------------------------------
-
-                    # Auch Shorts landen hier als normaler Upload.
                     embed = create_youtube_embed(
                         title=video["title"],
                         video_id=video["id"],
                         thumbnail=video["thumbnail"],
+                        description_text=video.get("description", ""),
                         is_live=False
                     )
 
                     await discord_channel.send(
-
                         content=(
                             f"@everyone "
                             f"{YOUTUBE_CHANNEL_NAME} "
                             f"hat ein neues Video hochgeladen!"
                         ),
-
                         embed=embed
                     )
 
-
                 last_youtube_video_id = newest_video["id"]
 
-
             # -------------------------------------------------
-            # LIVESTREAM STARTEN, DER SCHON VORHER ANGELEGT WAR
+            # LIVESTREAM STARTEN, DER SCHON VORHER GEPLANT WAR
             # -------------------------------------------------
-            #
-            # Ein Stream kann bereits als geplant existieren,
-            # ohne dass er schon LIVE ist.
-            # Deshalb prüfen wir zusätzlich die neuesten
-            # Streams auf einen neu gestarteten Stream.
-            #
-
+            # Dieser zweite Check erkennt den Moment, in dem ein
+            # bereits angekündigter Stream tatsächlich LIVE geht.
+            # -------------------------------------------------
             video_details = await get_video_details(
                 session,
                 [video["id"] for video in videos]
             )
 
-
             for details in video_details:
-
                 video_id = details["id"]
-
-                live_details = details.get(
-                    "liveStreamingDetails"
-                )
+                live_details = details.get("liveStreamingDetails")
 
                 if not live_details:
                     continue
 
-                actual_start = live_details.get(
-                    "actualStartTime"
-                )
+                actual_start = live_details.get("actualStartTime")
+                actual_end = live_details.get("actualEndTime")
 
-                actual_end = live_details.get(
-                    "actualEndTime"
-                )
-
-                # Jetzt tatsächlich LIVE
                 if actual_start and not actual_end:
-
                     if video_id == last_live_video_id:
                         continue
-
 
                     matching_video = next(
                         (
@@ -1369,36 +1306,28 @@ async def youtube_checker():
                     if not matching_video:
                         continue
 
-
                     embed = create_youtube_embed(
                         title=matching_video["title"],
                         video_id=video_id,
                         thumbnail=matching_video["thumbnail"],
+                        description_text=matching_video.get("description", ""),
                         is_live=True
                     )
 
-
                     await discord_channel.send(
-
                         content=(
                             f"@everyone "
                             f"{YOUTUBE_CHANNEL_NAME} "
                             f"ist gerade **LIVE**! 🔴"
                         ),
-
                         embed=embed
                     )
 
-
                     last_live_video_id = video_id
 
-
     except asyncio.CancelledError:
-
         raise
-
     except Exception as error:
-
         print(
             f"Fehler im YouTube-Checker: {error}"
         )
@@ -1413,435 +1342,6 @@ async def before_youtube_checker():
 
     await bot.wait_until_ready()
 
-
-# =========================================================
-# MOD-LOG EVENTS
-# =========================================================
-
-@bot.event
-async def on_guild_channel_create(channel: discord.abc.GuildChannel):
-    # Ticket-Kanäle werden separat als "Ticket erstellt" geloggt.
-    if is_ticket_channel(channel):
-        return
-
-    actor, audit_reason = await get_audit_actor(
-        channel.guild,
-        discord.AuditLogAction.channel_create,
-        channel.id
-    )
-
-    await send_mod_log(
-        guild=channel.guild,
-        action="Channel erstellt",
-        color=MOD_LOG_COLORS["channel_created"],
-        target=f"#{channel.name}",
-        actor=format_actor(actor),
-        reason=audit_reason or f"Channel erstellt von {actor or 'Unbekannt'}"
-    )
-
-
-@bot.event
-async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
-    # Ticket-Kanäle werden separat als "Ticket gelöscht" geloggt.
-    if is_ticket_channel(channel):
-        return
-
-    actor, audit_reason = await get_audit_actor(
-        channel.guild,
-        discord.AuditLogAction.channel_delete,
-        channel.id
-    )
-
-    await send_mod_log(
-        guild=channel.guild,
-        action="Channel gelöscht",
-        color=MOD_LOG_COLORS["channel_deleted"],
-        target=f"#{channel.name}",
-        actor=format_actor(actor),
-        reason=audit_reason or f"Channel gelöscht von {actor or 'Unbekannt'}"
-    )
-
-
-@bot.event
-async def on_guild_channel_update(
-    before: discord.abc.GuildChannel,
-    after: discord.abc.GuildChannel
-):
-    if is_ticket_channel(before) or is_ticket_channel(after):
-        return
-
-    if before.name != after.name:
-        actor, audit_reason = await get_audit_actor(
-            after.guild,
-            discord.AuditLogAction.channel_update,
-            after.id
-        )
-
-        await send_mod_log(
-            guild=after.guild,
-            action="Channel umbenannt",
-            color=MOD_LOG_COLORS["channel_renamed"],
-            target=f"#{after.name}",
-            actor=format_actor(actor),
-            reason=audit_reason or f"Name geändert: {before.name} → {after.name}",
-            extra_fields=[("Vorheriger Name", f"#{before.name}", False), ("Neuer Name", f"#{after.name}", False)]
-        )
-
-    if getattr(before, "overwrites", None) != getattr(after, "overwrites", None):
-        actor, audit_reason = await get_audit_actor(
-            after.guild,
-            discord.AuditLogAction.channel_update,
-            after.id
-        )
-
-        detail = describe_channel_permission_changes(before, after)
-
-        await send_mod_log(
-            guild=after.guild,
-            action="Channel-Berechtigung geändert",
-            color=MOD_LOG_COLORS["channel_permissions"],
-            target=f"#{after.name}",
-            actor=format_actor(actor),
-            reason=audit_reason or "Berechtigungen des Channels geändert",
-            extra_fields=[("Berechtigungsänderungen", detail, False)]
-        )
-
-@bot.event
-async def on_guild_role_create(role: discord.Role):
-    actor, audit_reason = await get_audit_actor(
-        role.guild,
-        discord.AuditLogAction.role_create,
-        role.id
-    )
-
-    await send_mod_log(
-        guild=role.guild,
-        action="Rolle erstellt",
-        color=MOD_LOG_COLORS["role_created"],
-        target=f"@{role.name}",
-        actor=format_actor(actor),
-        reason=audit_reason or f"Rolle erstellt von {actor or 'Unbekannt'}"
-    )
-
-
-@bot.event
-async def on_guild_role_delete(role: discord.Role):
-    actor, audit_reason = await get_audit_actor(
-        role.guild,
-        discord.AuditLogAction.role_delete,
-        role.id
-    )
-
-    await send_mod_log(
-        guild=role.guild,
-        action="Rolle gelöscht",
-        color=MOD_LOG_COLORS["role_deleted"],
-        target=f"@{role.name}",
-        actor=format_actor(actor),
-        reason=audit_reason or f"Rolle gelöscht von {actor or 'Unbekannt'}"
-    )
-
-
-@bot.event
-async def on_guild_role_update(
-    before: discord.Role,
-    after: discord.Role
-):
-    if before == after:
-        return
-
-    actor, audit_reason = await get_audit_actor(
-        after.guild,
-        discord.AuditLogAction.role_update,
-        after.id
-    )
-
-    detail = describe_role_permission_changes(before, after)
-    audit_detail = "Keine zusätzlichen Audit-Log-Details."
-    try:
-        async for entry in after.guild.audit_logs(limit=10, action=discord.AuditLogAction.role_update):
-            if getattr(entry.target, "id", None) == after.id and (discord.utils.utcnow() - entry.created_at).total_seconds() <= 15:
-                audit_detail = describe_audit_changes(entry)
-                break
-    except (discord.Forbidden, discord.HTTPException):
-        pass
-
-    await send_mod_log(
-        guild=after.guild,
-        action="Rolle geändert",
-        color=MOD_LOG_COLORS["role_updated"],
-        target=f"@{after.name}",
-        actor=format_actor(actor),
-        reason=audit_reason or "Einstellungen der Rolle geändert",
-        extra_fields=[
-            ("Rollenname vorher", before.name, True),
-            ("Rollenname nachher", after.name, True),
-            ("Rechte der Rolle", detail, False),
-            ("Weitere Änderungen", audit_detail, False),
-        ]
-    )
-
-
-@bot.event
-async def on_member_update(
-    before: discord.Member,
-    after: discord.Member
-):
-    # Rollen hinzugefügt / entfernt
-    before_roles = {role.id: role for role in before.roles if role.is_default() is False}
-    after_roles = {role.id: role for role in after.roles if role.is_default() is False}
-
-    added_roles = [after_roles[rid] for rid in after_roles.keys() - before_roles.keys()]
-    removed_roles = [before_roles[rid] for rid in before_roles.keys() - after_roles.keys()]
-
-    if added_roles or removed_roles:
-        actor, audit_reason = await get_audit_actor(
-            after.guild,
-            discord.AuditLogAction.member_role_update,
-            after.id
-        )
-
-        await send_mod_log(
-            guild=after.guild,
-            action="Rollen vergeben / entfernt",
-            color=MOD_LOG_COLORS["role_updated"],
-            target=f"{after.mention} ({after})",
-            actor=format_actor(actor),
-            reason=audit_reason or "Rollen eines Users geändert",
-            extra_fields=[
-                ("Rollen vergeben", format_role_list(added_roles), False),
-                ("Rollen entfernt", format_role_list(removed_roles), False),
-            ]
-        )
-
-    # Timeout
-    before_timeout = before.communication_disabled_until
-    after_timeout = after.communication_disabled_until
-
-    if before_timeout == after_timeout:
-        return
-
-    actor, audit_reason = await get_audit_actor(
-        after.guild,
-        discord.AuditLogAction.member_update,
-        after.id
-    )
-
-    if after_timeout is not None:
-        await send_mod_log(
-            guild=after.guild,
-            action="Timeout vergeben",
-            color=MOD_LOG_COLORS["timeout_given"],
-            target=f"{after.mention} ({after})",
-            actor=format_actor(actor),
-            reason=audit_reason or "Timeout vergeben",
-            extra_fields=[("Timeout bis", f"{after_timeout:%d.%m.%Y %H:%M:%S UTC}", False)]
-        )
-    else:
-        await send_mod_log(
-            guild=after.guild,
-            action="Timeout entfernt",
-            color=MOD_LOG_COLORS["timeout_removed"],
-            target=f"{after.mention} ({after})",
-            actor=format_actor(actor),
-            reason=audit_reason or "Timeout entfernt"
-        )
-
-@bot.event
-async def on_member_ban(guild: discord.Guild, user: discord.User):
-    actor, audit_reason = await get_audit_actor(
-        guild,
-        discord.AuditLogAction.member_ban_add,
-        user.id
-    )
-
-    await send_mod_log(
-        guild=guild,
-        action="User gebannt",
-        color=MOD_LOG_COLORS["user_banned"],
-        target=f"{user.mention} ({user})",
-        actor=format_actor(actor),
-        reason=audit_reason or "Kein Ban-Grund angegeben",
-        extra_fields=[("Gebannt wurde", f"{user.mention} ({user})", False)]
-    )
-
-
-@bot.event
-async def on_member_unban(guild: discord.Guild, user: discord.User):
-    actor, audit_reason = await get_audit_actor(
-        guild,
-        discord.AuditLogAction.member_ban_remove,
-        user.id
-    )
-
-    await send_mod_log(
-        guild=guild,
-        action="User entbannt",
-        color=MOD_LOG_COLORS["user_unbanned"],
-        target=f"{user.mention} ({user})",
-        actor=format_actor(actor),
-        reason=audit_reason or "Kein Entbannungs-Grund angegeben",
-        extra_fields=[("Entbannt wurde", f"{user.mention} ({user})", False)]
-    )
-
-
-@bot.event
-async def on_member_remove(member: discord.Member):
-    actor, audit_reason = await get_audit_actor(
-        member.guild,
-        discord.AuditLogAction.member_kick,
-        member.id
-    )
-
-    if actor is None:
-        return
-
-    await send_mod_log(
-        guild=member.guild,
-        action="User gekickt",
-        color=MOD_LOG_COLORS["user_kicked"],
-        target=f"{member.mention} ({member})",
-        actor=format_actor(actor),
-        reason=audit_reason or "Kein Kick-Grund angegeben",
-        extra_fields=[("Gekickt wurde", f"{member.mention} ({member})", False)]
-    )
-
-
-@bot.event
-async def on_member_update(
-    before: discord.Member,
-    after: discord.Member
-):
-    before_timeout = before.communication_disabled_until
-    after_timeout = after.communication_disabled_until
-
-    if before_timeout == after_timeout:
-        return
-
-    actor, audit_reason = await get_audit_actor(
-        after.guild,
-        discord.AuditLogAction.member_update,
-        after.id
-    )
-
-    if after_timeout is not None:
-        await send_mod_log(
-            guild=after.guild,
-            action="Timeout vergeben",
-            color=MOD_LOG_COLORS["timeout_given"],
-            target=f"{after.mention} ({after})",
-            actor=format_actor(actor),
-            reason=(
-                audit_reason
-                or f"Timeout vergeben bis {after_timeout:%d.%m.%Y %H:%M} UTC"
-            )
-        )
-    else:
-        await send_mod_log(
-            guild=after.guild,
-            action="Timeout entfernt",
-            color=MOD_LOG_COLORS["timeout_removed"],
-            target=f"{after.mention} ({after})",
-            actor=format_actor(actor),
-            reason=audit_reason or f"Timeout entfernt von {actor or 'Unbekannt'}"
-        )
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    # Message Content Intent ist erforderlich, damit Inhalte gespeichert
-    # und !-Commands verarbeitet werden können.
-    if message.guild is not None and not message.author.bot:
-        message_cache[message.id] = {
-            "guild_id": message.guild.id,
-            "channel_id": message.channel.id,
-            "author": message.author,
-            "content": message.content,
-        }
-
-        if len(message_cache) > MESSAGE_CACHE_LIMIT:
-            oldest_ids = list(message_cache.keys())[:500]
-            for message_id in oldest_ids:
-                message_cache.pop(message_id, None)
-
-    await bot.process_commands(message)
-
-
-@bot.event
-async def on_message_delete(message: discord.Message):
-    if message.guild is None:
-        return
-
-    if message.author and message.author.bot:
-        message_cache.pop(message.id, None)
-        return
-
-    cached = message_cache.pop(message.id, {})
-    author = cached.get("author") or message.author
-    content = cached.get("content", message.content)
-
-    actor, audit_reason = await get_audit_actor(
-        message.guild,
-        discord.AuditLogAction.message_delete,
-        getattr(message.channel, "id", None)
-    )
-
-    # Falls Discord den Kanal nicht als Target liefert, noch einmal ohne Target suchen.
-    if actor is None:
-        actor, audit_reason = await get_audit_actor(
-            message.guild,
-            discord.AuditLogAction.message_delete,
-            delay=0
-        )
-
-    await send_mod_log(
-        guild=message.guild,
-        action="Nachricht gelöscht",
-        color=MOD_LOG_COLORS["message_deleted"],
-        target=(
-            f"{message.channel.mention}\n"
-            f"Nachricht-ID: `{message.id}`"
-        ),
-        actor=format_actor(actor),
-        reason=audit_reason or "Nachricht wurde gelöscht",
-        extra_fields=[
-            ("Nachrichten-Autor", format_actor(author), False),
-            ("Gelöscht von", format_actor(actor), False),
-            ("Nachricht", f"```\n{shorten_text(content)}\n```", False),
-        ]
-    )
-
-
-@bot.event
-async def on_message_edit(
-    before: discord.Message,
-    after: discord.Message
-):
-    if before.guild is None:
-        return
-
-    if before.author and before.author.bot:
-        return
-
-    if before.content == after.content:
-        return
-
-    await send_mod_log(
-        guild=before.guild,
-        action="Nachricht bearbeitet",
-        color=MOD_LOG_COLORS["message_edited"],
-        target=(
-            f"{before.channel.mention}\n"
-            f"Nachricht-ID: `{before.id}`"
-        ),
-        actor=format_actor(before.author),
-        reason="Nachricht wurde bearbeitet",
-        extra_fields=[
-            ("Autor", format_actor(before.author), False),
-            ("Vorher", f"```\n{shorten_text(before.content)}\n```", False),
-            ("Nachher", f"```\n{shorten_text(after.content)}\n```", False),
-        ]
-    )
 
 # =========================================================
 # BOT READY
