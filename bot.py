@@ -1315,10 +1315,10 @@ async def youtube_checker():
             # LIVESTREAM STARTEN, DER SCHON VORHER ANGELEGT WAR
             # -------------------------------------------------
             #
-            # Ein Stream kann bereits als Video existieren,
+            # Ein Stream kann bereits als geplant existieren,
             # ohne dass er schon LIVE ist.
             # Deshalb prüfen wir zusätzlich die neuesten
-            # Videos auf einen neu gestarteten Stream.
+            # Streams auf einen neu gestarteten Stream.
             #
 
             video_details = await get_video_details(
