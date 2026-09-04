@@ -1158,118 +1158,69 @@ async def youtube_checker():
                 return
 
             # -------------------------------------------------
-            # NEUE YOUTUBE-UPLOADS
+            # NUR DER NEUESTE YOUTUBE-UPLOAD
+            # -------------------------------------------------
+            # Absichtlich nur videos[0] verarbeiten. Dadurch werden
+            # ältere Uploads/Streams niemals als "neu" nachgeschickt.
             # -------------------------------------------------
             newest_video = videos[0]
 
             if newest_video["id"] != last_youtube_video_id:
-                new_videos = []
-
-                for video in videos:
-                    if video["id"] == last_youtube_video_id:
-                        break
-                    new_videos.append(video)
-
-                # Älteste zuerst ankündigen
-                new_videos.reverse()
-
                 video_details = await get_video_details(
                     session,
-                    [video["id"] for video in new_videos]
+                    [newest_video["id"]]
                 )
 
-                details_by_id = {
-                    video["id"]: video
-                    for video in video_details
-                }
+                details = video_details[0] if video_details else {}
+                live_details = details.get("liveStreamingDetails") or {}
 
-                for video in new_videos:
-                    details = details_by_id.get(video["id"])
+                actual_start = live_details.get("actualStartTime")
+                actual_end = live_details.get("actualEndTime")
+                scheduled_start = live_details.get("scheduledStartTime")
 
-                    if not details:
-                        continue
-
-                    live_details = details.get("liveStreamingDetails")
-
-                    # -------------------------------------------------
-                    # LIVESTREAM / GEPLANTER STREAM
-                    # -------------------------------------------------
-                    if live_details:
-                        actual_start = live_details.get("actualStartTime")
-                        actual_end = live_details.get("actualEndTime")
-
-                        # Geplanter Stream: noch nicht gestartet.
-                        # NIEMALS als normales Video behandeln.
-                        if not actual_start:
-                            embed = create_youtube_embed(
-                                title=video["title"],
-                                video_id=video["id"],
-                                thumbnail=video["thumbnail"],
-                                description_text=video.get("description", ""),
-                                is_scheduled=True
-                            )
-
-                            await discord_channel.send(
-                                content=(
-                                    f"@everyone "
-                                    f"{YOUTUBE_CHANNEL_NAME} "
-                                    f"hat einen **Stream geplant**. 📅"
-                                ),
-                                embed=embed
-                            )
-
-                            continue
-
-                        # Tatsächlich LIVE
-                        if actual_start and not actual_end:
-                            if video["id"] != last_live_video_id:
-                                embed = create_youtube_embed(
-                                    title=video["title"],
-                                    video_id=video["id"],
-                                    thumbnail=video["thumbnail"],
-                                    description_text=video.get("description", ""),
-                                    is_live=True
-                                )
-
-                                await discord_channel.send(
-                                    content=(
-                                        f"@everyone "
-                                        f"{YOUTUBE_CHANNEL_NAME} "
-                                        f"ist gerade **LIVE**! 🔴"
-                                    ),
-                                    embed=embed
-                                )
-
-                                last_live_video_id = video["id"]
-
-                            continue
-
-                        # Beendete Streams nicht als normales Video posten.
-                        continue
-
-                    # -------------------------------------------------
-                    # NORMALES VIDEO / SHORT
-                    # -------------------------------------------------
+                if scheduled_start and not actual_start:
                     embed = create_youtube_embed(
-                        title=video["title"],
-                        video_id=video["id"],
-                        thumbnail=video["thumbnail"],
-                        description_text=video.get("description", ""),
+                        title=newest_video["title"],
+                        video_id=newest_video["id"],
+                        thumbnail=newest_video["thumbnail"],
+                        description_text=newest_video.get("description", ""),
+                        is_scheduled=True
+                    )
+
+                    await discord_channel.send(
+                        content=(
+                            f"@everyone {YOUTUBE_CHANNEL_NAME} "
+                            f"hat einen **Stream geplant**. 📅"
+                        ),
+                        embed=embed
+                    )
+
+                elif actual_start and actual_end:
+                    # Beendete Streams nicht als normales Video posten.
+                    pass
+
+                else:
+                    # Normaler Upload oder Short: genau EIN neuer Eintrag.
+                    embed = create_youtube_embed(
+                        title=newest_video["title"],
+                        video_id=newest_video["id"],
+                        thumbnail=newest_video["thumbnail"],
+                        description_text=newest_video.get("description", ""),
                         is_live=False
                     )
 
                     await discord_channel.send(
                         content=(
-                            f"@everyone "
-                            f"{YOUTUBE_CHANNEL_NAME} "
+                            f"@everyone {YOUTUBE_CHANNEL_NAME} "
                             f"hat ein neues Video hochgeladen!"
                         ),
                         embed=embed
                     )
 
+                # Sofort als gesehen markieren: ältere Feed-Einträge
+                # werden dadurch niemals nachträglich verschickt.
                 last_youtube_video_id = newest_video["id"]
 
-            # -------------------------------------------------
             # LIVESTREAM STARTEN, DER SCHON VORHER GEPLANT WAR
             # -------------------------------------------------
             # Dieser zweite Check erkennt den Moment, in dem ein
