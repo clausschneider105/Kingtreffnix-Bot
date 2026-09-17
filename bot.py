@@ -1415,7 +1415,7 @@ def create_twitch_embed(stream):
         title=title,
         url=f"https://www.twitch.tv/{TWITCH_CHANNEL_NAME}",
         description="🔴 **LIVE auf Twitch**",
-        color=discord.Color.red()
+        color=discord.Color.from_rgb(145, 70, 255)
     )
 
     if game_name:
@@ -1483,13 +1483,14 @@ async def before_twitch_checker():
 
 @bot.tree.command(
     name="socialtest",
-    description="Testet die Social-Media-Benachrichtigung."
+    description="Testet die Social-Media-Benachrichtigungen."
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def socialtest(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     discord_channel = get_youtube_discord_channel()
+
     if discord_channel is None:
         await interaction.followup.send(
             f"❌ Der Kanal **{YOUTUBE_DISCORD_CHANNEL_NAME}** wurde nicht gefunden.",
@@ -1497,24 +1498,51 @@ async def socialtest(interaction: discord.Interaction):
         )
         return
 
-    embed = discord.Embed(
-        title="Social-Media-Test",
-        description=(
-            f"🟣 **Twitch:** @{TWITCH_CHANNEL_NAME}\n\n"
-            "TikTok und Instagram werden über ihre jeweiligen "
-            "offiziellen Schnittstellen angebunden."
-        ),
-        color=discord.Color.red()
+    # Twitch – lila
+    twitch_embed = discord.Embed(
+        title="Kingtreffnix ist gerade LIVE!",
+        url=f"https://www.twitch.tv/{TWITCH_CHANNEL_NAME}",
+        description="🔴 **LIVE auf Twitch**",
+        color=discord.Color.from_rgb(145, 70, 255)
     )
-    embed.set_footer(text=f"{BOT_DISPLAY_NAME} • Social Notifications")
+    twitch_embed.set_footer(text=f"{BOT_DISPLAY_NAME} • Twitch")
 
     await discord_channel.send(
-        content="🧪 **Social-Benachrichtigungstest**",
-        embed=embed
+        content=f"🟣 **Twitch-Test:** @{TWITCH_CHANNEL_NAME}",
+        embed=twitch_embed
+    )
+
+    # TikTok – schwarz
+    tiktok_embed = discord.Embed(
+        title="Neues TikTok von Kingtreffnix",
+        url="https://www.tiktok.com/@kingtreffnix",
+        description="🎵 **Neues TikTok**",
+        color=discord.Color.from_rgb(0, 0, 0)
+    )
+    tiktok_embed.set_footer(text=f"{BOT_DISPLAY_NAME} • TikTok")
+
+    await discord_channel.send(
+        content="⚫ **TikTok-Test:** @kingtreffnix",
+        embed=tiktok_embed
+    )
+
+    # Instagram – pink
+    instagram_embed = discord.Embed(
+        title="Neuer Instagram-Post von Kingtreffnix",
+        url="https://www.instagram.com/kingtreffnix/",
+        description="📸 **Neuer Instagram-Post**",
+        color=discord.Color.from_rgb(225, 48, 108)
+    )
+    instagram_embed.set_footer(text=f"{BOT_DISPLAY_NAME} • Instagram")
+
+    await discord_channel.send(
+        content="🩷 **Instagram-Test:** @kingtreffnix",
+        embed=instagram_embed
     )
 
     await interaction.followup.send(
-        f"✅ Test wurde in {discord_channel.mention} gesendet.",
+        f"✅ Twitch-, TikTok- und Instagram-Test wurden in "
+        f"{discord_channel.mention} gesendet.",
         ephemeral=True
     )
 
