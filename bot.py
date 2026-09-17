@@ -18,6 +18,11 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
+# Social-Media / Twitch (optional – YouTube bleibt unverändert)
+TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
+TWITCH_CHANNEL_NAME = os.getenv("TWITCH_CHANNEL_NAME", "kingtreffnix20")
+
 if not DISCORD_TOKEN:
     raise ValueError(
         "DISCORD_TOKEN wurde nicht gefunden. Überprüfe deine .env-Datei."
@@ -74,6 +79,11 @@ bot = commands.Bot(
 
 last_youtube_video_id = None
 last_live_video_id = None
+
+# Twitch status
+twitch_user_id = None
+twitch_access_token = None
+twitch_was_live = None
 
 
 # =========================================================
@@ -1285,6 +1295,231 @@ async def youtube_checker():
 
 
 # =========================================================
+# TWITCH
+# =========================================================
+
+async def twitch_get_access_token(session):
+    global twitch_access_token
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return None
+    try:
+        async with session.post(
+            "https://id.twitch.tv/oauth2/token",
+            params={
+                "client_id": TWITCH_CLIENT_ID,
+                "client_secret": TWITCH_CLIENT_SECRET,
+                "grant_type": "client_credentials"
+            },
+            timeout=20
+        ) as response:
+            data = await response.json()
+            if response.status != 200:
+                print(f"Twitch OAuth Fehler {response.status}: {data}")
+                return None
+            twitch_access_token = data.get("access_token")
+            return twitch_access_token
+    except Exception as error:
+        print(f"Fehler beim Twitch OAuth: {error}")
+        return None
+
+
+async def twitch_api_request(session, endpoint, params=None):
+    global twitch_access_token
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return None
+    if not twitch_access_token:
+        twitch_access_token = await twitch_get_access_token(session)
+    if not twitch_access_token:
+        return None
+
+    url = f"https://api.twitch.tv/helix/{endpoint}"
+    headers = {
+        "Client-ID": TWITCH_CLIENT_ID,
+        "Authorization": f"Bearer {twitch_access_token}"
+    }
+
+    try:
+        async with session.get(
+            url, headers=headers, params=params or {}, timeout=20
+        ) as response:
+            if response.status == 401:
+                twitch_access_token = None
+                twitch_access_token = await twitch_get_access_token(session)
+                if not twitch_access_token:
+                    return None
+                headers["Authorization"] = f"Bearer {twitch_access_token}"
+                async with session.get(
+                    url, headers=headers, params=params or {}, timeout=20
+                ) as retry_response:
+                    if retry_response.status != 200:
+                        text = await retry_response.text()
+                        print(f"Twitch API Fehler {retry_response.status}: {text}")
+                        return None
+                    return await retry_response.json()
+
+            if response.status != 200:
+                text = await response.text()
+                print(f"Twitch API Fehler {response.status}: {text}")
+                return None
+            return await response.json()
+    except Exception as error:
+        print(f"Fehler bei der Twitch API: {error}")
+        return None
+
+
+async def get_twitch_user_id(session):
+    global twitch_user_id
+    if twitch_user_id:
+        return twitch_user_id
+
+    data = await twitch_api_request(
+        session, "users", {"login": TWITCH_CHANNEL_NAME}
+    )
+    if not data:
+        return None
+
+    users = data.get("data", [])
+    if not users:
+        print(f"Twitch-Kanal @{TWITCH_CHANNEL_NAME} wurde nicht gefunden.")
+        return None
+
+    twitch_user_id = users[0].get("id")
+    return twitch_user_id
+
+
+async def get_twitch_stream(session):
+    user_id = await get_twitch_user_id(session)
+    if not user_id:
+        return None
+
+    data = await twitch_api_request(
+        session, "streams", {"user_id": user_id}
+    )
+    if not data:
+        return None
+
+    streams = data.get("data", [])
+    return streams[0] if streams else None
+
+
+def create_twitch_embed(stream):
+    title = stream.get("title") or "Twitch-Livestream"
+    game_name = stream.get("game_name") or ""
+    thumbnail = stream.get("thumbnail_url")
+
+    if thumbnail:
+        thumbnail = thumbnail.replace("{width}", "1280")
+        thumbnail = thumbnail.replace("{height}", "720")
+
+    embed = discord.Embed(
+        title=title,
+        url=f"https://www.twitch.tv/{TWITCH_CHANNEL_NAME}",
+        description="🔴 **LIVE auf Twitch**",
+        color=discord.Color.red()
+    )
+
+    if game_name:
+        embed.add_field(name="Spiel", value=game_name, inline=True)
+
+    if thumbnail:
+        embed.set_image(url=thumbnail)
+
+    embed.set_footer(text="Kingtreffnix • Twitch")
+    return embed
+
+
+@tasks.loop(seconds=120)
+async def twitch_checker():
+    global twitch_was_live
+
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return
+
+    try:
+        discord_channel = get_youtube_discord_channel()
+        if discord_channel is None:
+            print(
+                f"Discord-Kanal {YOUTUBE_DISCORD_CHANNEL_NAME} "
+                f"wurde für Twitch nicht gefunden."
+            )
+            return
+
+        async with aiohttp.ClientSession() as session:
+            stream = await get_twitch_stream(session)
+            is_live = stream is not None
+
+            if twitch_was_live is None:
+                twitch_was_live = is_live
+                print("Twitch-Checker gestartet.")
+                return
+
+            if is_live and not twitch_was_live:
+                embed = create_twitch_embed(stream)
+                await discord_channel.send(
+                    content=(
+                        f"@everyone {BOT_DISPLAY_NAME} ist gerade "
+                        f"auf Twitch **LIVE**! 🔴\n"
+                        f"https://www.twitch.tv/{TWITCH_CHANNEL_NAME}"
+                    ),
+                    embed=embed
+                )
+
+            twitch_was_live = is_live
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        print(f"Fehler im Twitch-Checker: {error}")
+
+
+@twitch_checker.before_loop
+async def before_twitch_checker():
+    await bot.wait_until_ready()
+
+
+# =========================================================
+# /socialtest
+# =========================================================
+
+@bot.tree.command(
+    name="socialtest",
+    description="Testet die Social-Media-Benachrichtigung."
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def socialtest(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    discord_channel = get_youtube_discord_channel()
+    if discord_channel is None:
+        await interaction.followup.send(
+            f"❌ Der Kanal **{YOUTUBE_DISCORD_CHANNEL_NAME}** wurde nicht gefunden.",
+            ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="Social-Media-Test",
+        description=(
+            f"🟣 **Twitch:** @{TWITCH_CHANNEL_NAME}\n\n"
+            "TikTok und Instagram werden über ihre jeweiligen "
+            "offiziellen Schnittstellen angebunden."
+        ),
+        color=discord.Color.red()
+    )
+    embed.set_footer(text=f"{BOT_DISPLAY_NAME} • Social Notifications")
+
+    await discord_channel.send(
+        content="🧪 **Social-Benachrichtigungstest**",
+        embed=embed
+    )
+
+    await interaction.followup.send(
+        f"✅ Test wurde in {discord_channel.mention} gesendet.",
+        ephemeral=True
+    )
+
+
+# =========================================================
 # YOUTUBE CHECKER START
 # =========================================================
 
@@ -1327,6 +1562,14 @@ async def on_ready():
     if not youtube_checker.is_running():
 
         youtube_checker.start()
+
+    # Twitch-Checker starten (nur wenn Zugangsdaten vorhanden sind)
+    if (
+        TWITCH_CLIENT_ID
+        and TWITCH_CLIENT_SECRET
+        and not twitch_checker.is_running()
+    ):
+        twitch_checker.start()
 
 
 # =========================================================
