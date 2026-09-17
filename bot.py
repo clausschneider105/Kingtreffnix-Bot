@@ -1449,9 +1449,8 @@ async def twitch_checker():
             is_live = stream is not None
 
             if twitch_was_live is None:
-                twitch_was_live = is_live
+                twitch_was_live = False
                 print("Twitch-Checker gestartet.")
-                return
 
             if is_live and not twitch_was_live:
                 embed = create_twitch_embed(stream)
